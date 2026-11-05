@@ -1,0 +1,6 @@
+# Dependencies of the test fixtures and any local scratch.
+node_modules/
+
+# Runtime scratch: the per-process prompt file and probe leftovers.
+*.log
+.tmp/

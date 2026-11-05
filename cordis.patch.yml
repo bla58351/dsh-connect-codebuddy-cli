@@ -1,0 +1,12 @@
+# dsh-connect-codebuddy-cli bundle layer: inserts one plugin row that registers the
+# `codebuddy` LLM provider route.
+#
+# `name` is the PACKAGE NAME resolved through the profile's node_modules, not a
+# path. `id` is this row's loader identity; the profile patch layer targets it to
+# disable or re-configure the plugin without touching this file.
+#
+# There is no credential in this config on purpose: the adapter reuses the
+# CodeBuddy CLI's existing local login, so there is nothing to authenticate.
+- insert:
+    - id: connect-codebuddy-cli
+      name: 'dsh-connect-codebuddy-cli'

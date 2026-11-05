@@ -1,0 +1,11 @@
+{
+  "provider": {
+    "codebuddy": {
+      "name": "CodeBuddy"
+    }
+  },
+  "plugin": {
+    "name": "CodeBuddy bridge",
+    "description": "Exposes CodeBuddy's models in DSH's model picker. Selecting one runs the turn through the locally installed, already-signed-in CodeBuddy CLI; DSH only displays and transports it."
+  }
+}

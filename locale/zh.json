@@ -1,0 +1,11 @@
+{
+  "provider": {
+    "codebuddy": {
+      "name": "CodeBuddy"
+    }
+  },
+  "plugin": {
+    "name": "CodeBuddy 桥接",
+    "description": "把 CodeBuddy 的模型接进 DSH 的模型选择器。选中 CodeBuddy 模型后，这一轮推理由本机已登录的 CodeBuddy CLI 执行，DSH 只负责显示与传输。"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "name": "dsh-connect-codebuddy-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bridge CodeBuddy's models into DSH: selecting a CodeBuddy model runs the turn through the locally installed, already-signed-in CodeBuddy CLI.",
+  "icon": "./assets/icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./src/client/index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "src/**/*.js",
+    "src/**/*.mjs",
+    "cordis.patch.yml",
+    "assets/icon.svg",
+    "locale/*.json",
+    "README.md",
+    "CHANGELOG.md",
+    "docs/*.md",
+    "scripts/*.mjs"
+  ],
+  "scripts": {
+    "test": "node scripts/check.mjs && node scripts/check-docs.mjs && node scripts/test.mjs",
+    "test:live": "node scripts/test.mjs --live",
+    "check": "node scripts/check.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "external": [
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    }
+  }
+}
