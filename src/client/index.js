@@ -55,6 +55,7 @@ window.__ModuleLoader__.load({
 			".cbc_fieldRow>*:not(.cbc_input){flex:none}",
 			".cbc_check{flex:1;min-width:0}",
 			".cbc_check>span{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}",
+			".cbc_toolHint{color:var(--dsw-alias-label-tertiary);border:1px solid var(--dsw-alias-border-l2);border-radius:50%;cursor:help;flex:none;font-size:11px;font-weight:600;width:16px;height:16px;line-height:14px;text-align:center;user-select:none}",
 			".cbc_actions{flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px;display:flex}",
 			".cbc_buttons{flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px;display:flex}",
 			".cbc_notice{border:.5px solid var(--dsw-alias-state-warn-primary);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);margin-top:12px;padding:12px 14px}",
@@ -591,7 +592,15 @@ window.__ModuleLoader__.load({
 									// third-party package — see builtin-tools.js.
 									tool.origin === "external"
 										? h(primitives.Tag, { tone: "warning" }, pick("非内置（插件提供）", "not built in"))
-										: null
+										: null,
+										// Hover badge: catalog rows already carry each tool description;
+										// the badge only surfaces it on demand.
+										h("span", {
+											className: "cbc_toolHint",
+											title: typeof tool.description === "string" && tool.description !== ""
+												? tool.description
+												: pick("宿主没有提供这个工具的说明。", "The Host provides no description for this tool.")
+										}, "?"),
 								))),
 							available.length === 0 ? null : h("div", { className: "cbc_actions" },
 								h(primitives.Button, {

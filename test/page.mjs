@@ -13,6 +13,8 @@ import { readProductModels, probeAcpModelCatalog } from '../src/cli/session.js'
 import { settingsPath } from '../src/config/store.js'
 import { accountsPath } from '../src/account/pool.js'
 
+let lastOverview
+
 // Keep the test away from the user's real settings: the page edits them, and the
 // keep-alive value decides whether opening the page spawns a process at all.
 const testHome = mkdtempSync(join(tmpdir(), 'dsh-page-'))
@@ -163,6 +165,8 @@ const fakeTools = {
   schemas: () => [
     { name: 'example_tool', description: 'An example Host tool.', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
     { name: 'present', description: 'Declare deliverables.', parameters: { type: 'object', properties: {} } },
+    // lowercase `write` overlaps the CLI native tool, so the live default skips it
+    { name: 'write', description: 'CLI-overlapping write.', parameters: { type: 'object', properties: {} } },
     { name: 'run_code', description: 'ptc transport.', parameters: { type: 'object', properties: {} } },
   ],
   execute: async () => ({ content: [{ type: 'text', text: TOOL_RESULT_TEXT }], isError: false }),
@@ -225,7 +229,6 @@ let registration
 // A payload the next `overview` call should answer with instead of asking the
 // host. Used to render states this machine cannot be put into (no CLI installed).
 let overviewOverride
-let lastOverview
 const browserCtx = {
   get: (name) => name === 'connection'
     ? {
@@ -537,11 +540,27 @@ const externalTag = collect(toolsTree, node => node?.props?.['data-tone'] === 'w
 check('a plugin-provided tool is marked as not built in', externalTag !== undefined, String(externalTag))
 const builtinRow = findVisible(toolsTree, node => node?.type === 'label' && text(node) === 'present')
 check('a built-in tool carries no such mark', builtinRow !== undefined && text(builtinRow).includes('非内置') === false, text(builtinRow))
-check('the tools page starts with nothing enabled', !rpcCalls.includes('/codebuddy:save-tools'))
+// Each tool row ends with a hover badge that carries the tool's own
+// description from the catalog, so the meaning is one hover away.
+const hintBadges = collect(toolsTree, node => node?.props?.className === 'cbc_toolHint')
+check('each tool row carries a hint badge', hintBadges.length === 3, String(hintBadges.length))
+const describedBadge = hintBadges.find(node => node?.props?.title === 'An example Host tool.')
+check('the hint badge carries the tool description', describedBadge !== undefined, JSON.stringify(hintBadges.map(node => node?.props?.title)))
+// No explicit choice stored: the page must show the live default — every
+// tool checked except the CLI overlap (`write`). The rows are read through
+// the overview RPC instead of the tree: hidden panels keep their own
+// checkboxes mounted, so a tree walk would count the model list too.
+const defaultEnabled = (lastOverview?.tools?.available ?? []).map(row => [row.name, row.enabled === true])
+check('the tools page shows the live default choice',
+  defaultEnabled.length === 3
+  && defaultEnabled.every(([name, on]) => name === 'write' ? on === false : on === true),
+  JSON.stringify(defaultEnabled))
+check('the tools page starts without a save', !rpcCalls.includes('/codebuddy:save-tools'))
 
 const toolBox = findVisible(toolsTree, node => node?.type === 'input' && node?.props?.type === 'checkbox' && node.props.checked === false)
 check('the tools page renders checkboxes', toolBox !== undefined)
 toolBox.props.onChange({ target: { checked: true } })
+check('the unchecked box is the CLI overlap', typeof toolBox?.props?.id === 'string' ? toolBox.props.id.includes('write') : true, String(toolBox?.props?.id))
 const toolsDirtyTree = await settle(registration.component)
 // The models page has a Save button too and hidden panels stay mounted, so the
 // tools page's button is the last one in tree order.
@@ -551,7 +570,7 @@ toolSave?.props?.onClick()
 const toolsSavedTree = await settle(registration.component)
 check('the tool choice reaches the host', rpcCalls.includes('/codebuddy:save-tools'))
 const storedTools = JSON.parse(readFileSync(settingsPath(), 'utf8'))
-check('the tool choice is persisted', Array.isArray(storedTools.exposedTools) && storedTools.exposedTools.includes('example_tool'), JSON.stringify(storedTools.exposedTools))
+check('the tool choice is persisted', Array.isArray(storedTools.exposedTools) && storedTools.exposedTools.includes('example_tool') && storedTools.exposedTools.includes('write'), JSON.stringify(storedTools.exposedTools))
 check('the tools page reports the save', text(toolsSavedTree).includes('已保存'))
 
 // --- the accounts page ------------------------------------------------------

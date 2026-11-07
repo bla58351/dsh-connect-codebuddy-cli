@@ -7,6 +7,7 @@
  */
 
 import { createToolBridge, toMcpInputSchema } from './mcp.js'
+import { hasExposedToolsChoice } from '../config/store.js'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
@@ -15,6 +16,23 @@ const CLI_TOOL_NAMES = new Set([
   'bash', 'powershell', 'read', 'write', 'edit', 'grep', 'glob',
   'web_fetch', 'web_search', 'view_image', 'tool_search', 'defer_execute_tool',
 ])
+
+/**
+ * The tool choice to serve when the user has never made one.
+ *
+ * Every cataloged tool except `run_code` and the names the CLI already
+ * provides itself: the point of the bridge is DSH-only capability, and a
+ * bridged duplicate would only shadow the CLI native one. The list is
+ * therefore live — it follows whatever the Host currently registers.
+ * @param schemas - the Host tool schemas (`tools.schemas(agent)`).
+ * @returns the default exposed tool names, in catalog order.
+ */
+function defaultExposedTools(schemas) {
+  if (!Array.isArray(schemas)) return []
+  return schemas
+    .map(schema => schema?.name)
+    .filter(name => typeof name === 'string' && name !== '' && name !== 'run_code' && !CLI_TOOL_NAMES.has(name))
+}
 
 /**
  * Bridge DSH's own tools into the CLI over MCP.
@@ -59,6 +77,26 @@ function installToolBridge(ctx, adapter, settings) {
 }
 
 /**
+ * The tool list that governs the bridge: the stored choice when the settings
+ * file carries one, otherwise the live default — everything the Host
+ * registers except `run_code` and the CLI overlaps.
+ * @param services - the injected services.
+ * @param settings - the live settings state.
+ * @param sessionId - the DSH session id.
+ * @returns the effective exposed tool names.
+ */
+function effectiveExposedTools(services, settings, sessionId) {
+  const stored = Array.isArray(settings.exposedTools) ? settings.exposedTools : []
+  if (hasExposedToolsChoice()) return stored
+  const agent = agentOf(services, sessionId)
+  if (agent === undefined || services.tools === undefined) return stored
+  try {
+    return defaultExposedTools(services.tools.schemas(agent))
+  } catch {
+    return stored
+  }
+}
+/**
  * Resolve the agent that owns one DSH session.
  * @param services - the injected `tools`/`agents` services.
  * @param sessionId - the DSH session id.
@@ -85,14 +123,17 @@ function agentOf(services, sessionId) {
 function listBridgeTools(services, settings, sessionId) {
   const agent = agentOf(services, sessionId)
   if (agent === undefined || services.tools === undefined) return []
-  const exposed = new Set(settings.exposedTools)
-  if (exposed.size === 0) return []
   let schemas
   try {
     schemas = services.tools.schemas(agent)
   } catch {
     return []
   }
+  // The stored choice when the settings file carries one; otherwise the live
+  // default — everything except `run_code` and the CLI overlaps.
+  const chosen = hasExposedToolsChoice() ? settings.exposedTools : defaultExposedTools(schemas)
+  const exposed = new Set(chosen)
+  if (exposed.size === 0) return []
   return schemas
     .filter(schema => schema.name !== 'run_code' && exposed.has(schema.name))
     .map(schema => ({
@@ -113,7 +154,7 @@ function listBridgeTools(services, settings, sessionId) {
  */
 async function runBridgeTool(services, settings, request) {
   const name = request.name
-  if (!settings.exposedTools.includes(name)) return { ok: false, error: `工具 ${name} 没有启用` }
+  if (!effectiveExposedTools(services, settings, request.sessionId).includes(name)) return { ok: false, error: `工具 ${name} 没有启用` }
   if (name === 'run_code') return { ok: false, error: 'run_code 不能作为桥接工具' }
   const agent = agentOf(services, request.sessionId)
   if (agent === undefined) return { ok: false, error: '会话不在运行中，无法执行该工具' }
@@ -156,6 +197,8 @@ function isCollapsedToolset(tools) {
 export {
   CLI_TOOL_NAMES,
   agentOf,
+  defaultExposedTools,
+  effectiveExposedTools,
   installToolBridge,
   isCollapsedToolset,
   listBridgeTools,

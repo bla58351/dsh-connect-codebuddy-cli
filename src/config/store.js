@@ -178,12 +178,32 @@ export const DEFAULT_KEEP_ALIVE_SECONDS = 300
 /**
  * Tools bridged to the CLI before the user has chosen anything.
  *
- *  is the one that makes model-produced files — images included — show
- * up as deliverables in DSH; without it the model can only print a path. It is a
- * single tool with a short description, so the prompt cost is bounded, and the
- * page lets the user drop it.
+ * `present` is the floor: it is what turns model-produced files — images
+ * included — into deliverable cards in DSH; without it the model can only print
+ * a path. The rest of the default comes from the live catalog at runtime —
+ * every cataloged tool except the ones the CLI already provides itself — which
+ * `defaultExposedTools` in `src/bridge/tools.js` derives, because only the
+ * bridge layer knows which names overlap.
  */
 const DEFAULT_EXPOSED_TOOLS = ['present']
+
+/**
+ * Whether the settings file records an explicit tool choice.
+ *
+ * A missing `exposedTools` key predates the choice and must fall back to the
+ * defaults, while an explicit (possibly empty) list is the user's own decision
+ * and has to be respected. `readSettings` collapses both into one array, so the
+ * distinction has to be probed on the raw file.
+ * @returns `true` when the stored settings carry the key.
+ */
+export function hasExposedToolsChoice() {
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath(), 'utf8'))
+    return Array.isArray(parsed?.exposedTools)
+  } catch {
+    return false
+  }
+}
 
 /** Upper bound the page accepts, so a typo cannot pin a process for a day. */
 export const MAX_KEEP_ALIVE_SECONDS = 3600
@@ -276,9 +296,13 @@ export function writeSettings(settings) {
       ? settings.hiddenModels.filter(id => typeof id === 'string' && id !== '')
       : [],
     keepAliveSeconds: normalizeKeepAlive(settings?.keepAliveSeconds),
-    exposedTools: Array.isArray(settings?.exposedTools)
-      ? settings.exposedTools.filter(name => typeof name === 'string' && name !== '')
-      : [],
+    // Persist the tool choice only when the document carries one: a save that
+    // never touched the tools must stay "no explicit choice" (no key) so the
+    // live default keeps tracking the Host catalog instead of freezing into
+    // this document as a stale list.
+    ...(Array.isArray(settings?.exposedTools) ? {
+      exposedTools: settings.exposedTools.filter(name => typeof name === 'string' && name !== ''),
+    } : {}),
     promptMode: normalizePromptMode(settings?.promptMode),
     customPrompt: typeof settings?.customPrompt === 'string' && settings.customPrompt.trim() !== ''
       ? settings.customPrompt

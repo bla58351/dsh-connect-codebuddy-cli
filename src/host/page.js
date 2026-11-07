@@ -10,7 +10,7 @@ import { accountsPath, prepareAccount, readAccounts, writeAccounts } from '../ac
 import { cliStatus, readAccount, readCredits } from '../account/session.js'
 import { DEFAULT_MAX_TURNS, readAdvertisedModelIds, readProductModels } from '../cli/session.js'
 import { MAX_CUSTOM_PROMPT_CHARS, normalizePromptMode } from '../config/prompt.js'
-import { normalizeDeclarationPlacement, normalizeKeepAlive, settingsPath, writeSettings } from '../config/store.js'
+import { hasExposedToolsChoice, normalizeDeclarationPlacement, normalizeKeepAlive, settingsPath, writeSettings } from '../config/store.js'
 import { describeReadiness } from './readiness.js'
 
 /**
@@ -310,16 +310,21 @@ function saveExposedTools(state, payload) {
  * @returns the document to write.
  */
 function settingsForWrite(settings, change) {
-  return {
+  const document = {
     hiddenModels: settings.hiddenModels,
     keepAliveSeconds: settings.keepAliveSeconds,
-    exposedTools: settings.exposedTools,
     promptMode: settings.promptMode,
     customPrompt: settings.customPrompt,
     declareTools: settings.declareTools !== false,
     declarationPlacement: normalizeDeclarationPlacement(settings.declarationPlacement),
     ...change,
   }
+  // Only carry the tool list when a choice exists or this save makes one:
+  // an untouched list keeps the file "no explicit choice" so the live
+  // default keeps following the Host catalog.
+  if (change.exposedTools !== undefined) document.exposedTools = change.exposedTools
+  else if (hasExposedToolsChoice()) document.exposedTools = settings.exposedTools
+  return document
 }
 
 /**

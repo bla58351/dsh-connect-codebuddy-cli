@@ -20,6 +20,7 @@ import { dirname, join } from 'node:path'
 import { apply, PROVIDER_ID } from '../index.js'
 import { writeSettings, settingsPath } from '../src/config/store.js'
 import { createToolBridge, toMcpInputSchema } from '../src/bridge/mcp.js'
+import { defaultExposedTools, CLI_TOOL_NAMES } from '../src/bridge/tools.js'
 import { toolOrigin } from '../src/bridge/builtin-tools.js'
 import { buildArgs, userFrame, writeSystemPromptFile, codebuddyTranscriptPath, permissionModeFor, safeDenyReason } from '../src/cli/session.js'
 import { approvalSubjectFor } from '../src/adapter/adapter.js'
@@ -1106,20 +1107,40 @@ check('the new turn reports its own card', third.cards.length === 1)
   check('several images are kept in order', many.message.content.length === 3 && many.message.content[2].source.media_type === 'image/jpeg')
 }
 
-// --- multimodal output defaults to the present tool -------------------------
+// --- tool-choice defaults ---------------------------------------------------
 {
   // A settings file written before the tool bridge existed has no `exposedTools`
-  // key; that is not the same as an explicit empty choice.
-  const { readSettings } = await import('../src/config/store.js')
+  // key; that is not the same as an explicit empty choice. The stored fallback
+  // stays `present` (the deliverable channel); the live default that governs a
+  // turn is derived from the catalog instead — every tool except `run_code` and
+  // the ones the CLI already provides itself.
+  const { readSettings, hasExposedToolsChoice } = await import('../src/config/store.js')
   const file = settingsPath()
   const previous = existsSync(file) ? readFileSync(file, 'utf8') : ''
   writeFileSync(file, JSON.stringify({ hiddenModels: [], keepAliveSeconds: 60 }), 'utf8')
+  check('a file without a tool choice reports no explicit choice', hasExposedToolsChoice() === false, String(hasExposedToolsChoice()))
   const defaults = readSettings()
-  check('a file without a tool choice defaults to present', defaults.exposedTools.includes('present'), JSON.stringify(defaults.exposedTools))
+  check('a file without a tool choice falls back to present', defaults.exposedTools.includes('present'), JSON.stringify(defaults.exposedTools))
   writeFileSync(file, JSON.stringify({ hiddenModels: [], keepAliveSeconds: 60, exposedTools: [] }), 'utf8')
+  check('an explicit empty choice is recorded as such', hasExposedToolsChoice() === true, String(hasExposedToolsChoice()))
   const explicit = readSettings()
   check('an explicit empty choice is respected', explicit.exposedTools.length === 0, JSON.stringify(explicit.exposedTools))
   writeFileSync(file, previous, 'utf8')
+  // The live default follows the catalog and never duplicates CLI tools.
+  const schemas = [
+    { name: 'write' },
+    { name: 'present' },
+    { name: 'custom_tool' },
+    { name: 'run_code' },
+  ]
+  const live = defaultExposedTools(schemas)
+  check('the live default is the catalog minus CLI overlaps and run_code',
+    live.includes('present') && live.includes('custom_tool') && !live.includes('write') && !live.includes('run_code'),
+    JSON.stringify(live))
+  check('the live default keeps catalog order and drops nothing else',
+    JSON.stringify(live) === JSON.stringify(['present', 'custom_tool']),
+    JSON.stringify(live))
+  check('a non-array catalog yields no default', Array.isArray(defaultExposedTools(undefined)) && defaultExposedTools(undefined).length === 0, JSON.stringify(defaultExposedTools(undefined)))
 }
 
 // --- tool provenance -------------------------------------------------------

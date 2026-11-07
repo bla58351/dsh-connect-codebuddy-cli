@@ -13,8 +13,8 @@ import { toolOrigin } from '../bridge/builtin-tools.js'
 import { availableModels, creditsFor, modelInfoFor, parseCreditLabel, providerModelId } from '../cli/catalog.js'
 import { CHAT_SYSTEM_PROMPT, codebuddySessionId, codebuddyTranscriptPath, openCli, permissionModeFor, probeAcpModelCatalog, productManifestFor, readAdvertisedModelIds, readProductModels, resolveCliEntry, unavailableMessage, writeMcpConfigFile, writeSystemPromptFile } from '../cli/session.js'
 import { MAX_CUSTOM_PROMPT_CHARS, PROMPT_MODES, normalizePromptMode } from '../config/prompt.js'
-import { MAX_TRACKED_SESSIONS, flushHistories, normalizeDeclarationPlacement, readHistories, writeHistories } from '../config/store.js'
-import { CLI_TOOL_NAMES, agentOf, isCollapsedToolset } from '../bridge/tools.js'
+import { MAX_TRACKED_SESSIONS, flushHistories, hasExposedToolsChoice, normalizeDeclarationPlacement, readHistories, writeHistories } from '../config/store.js'
+import { CLI_TOOL_NAMES, agentOf, defaultExposedTools, isCollapsedToolset } from '../bridge/tools.js'
 import { CodeBuddyTurn } from './turn.js'
 import { SPENT_TURN } from '../bridge/cards.js'
 import { continuesSignature, continuesTurn, conversationSignature, latestUserText } from '../conversation/messages.js'
@@ -266,7 +266,7 @@ class CodeBuddyAdapter {
    */
   mcpConfigFor(sessionId, fileKey = sessionId) {
     if (this.#bridge === undefined || this.#shimPath === '') return ''
-    if (!Array.isArray(this.#settings.exposedTools) || this.#settings.exposedTools.length === 0) return ''
+    if (this.#effectiveExposedTools().length === 0) return ''
     if (this.#bridge.ready !== true) return ''
     // The config carries the bridge's bearer token, so it is written to a
     // per-session file instead of riding in argv: a command line is readable
@@ -282,7 +282,7 @@ class CodeBuddyAdapter {
    * @returns `{ available, exposed, sessionId, bridge }`.
    */
   toolCatalog() {
-    const exposed = Array.isArray(this.#settings.exposedTools) ? this.#settings.exposedTools : []
+    const exposed = this.#effectiveExposedTools()
     const base = { exposed, available: [], sessionId: '', bridge: this.#bridge?.ready === true }
     const services = this.#toolServices
     if (services === undefined || services.tools === undefined) return base
@@ -308,6 +308,26 @@ class CodeBuddyAdapter {
           overlap: CLI_TOOL_NAMES.has(String(schema.name).toLowerCase()),
           origin: toolOrigin(schema.name),
         })),
+    }
+  }
+
+  /**
+   * The tool list that governs this turn: the stored choice when the settings
+   * file carries one, otherwise the live default — everything the Host
+   * registers except what the CLI already provides itself.
+   * @returns the effective exposed tool names.
+   */
+  #effectiveExposedTools() {
+    const stored = Array.isArray(this.#settings.exposedTools) ? this.#settings.exposedTools : []
+    if (hasExposedToolsChoice()) return stored
+    const services = this.#toolServices
+    if (services === undefined || services.tools === undefined) return stored
+    const agent = agentOf(services, this.#lastKey !== '' ? this.#lastKey : latestSessionId())
+    if (agent === undefined) return stored
+    try {
+      return defaultExposedTools(services.tools.schemas(agent))
+    } catch {
+      return stored
     }
   }
 
@@ -422,7 +442,7 @@ class CodeBuddyAdapter {
    * @returns `['name — first sentence', …]`, empty when nothing is bridged.
    */
   #declaredToolLines() {
-    const exposed = Array.isArray(this.#settings.exposedTools) ? this.#settings.exposedTools : []
+    const exposed = this.#effectiveExposedTools()
     if (exposed.length === 0) return []
     const services = this.#toolServices
     if (services === undefined || services.tools === undefined) return []
