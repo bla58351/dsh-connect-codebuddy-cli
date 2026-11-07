@@ -16,7 +16,7 @@ import { MAX_CUSTOM_PROMPT_CHARS, PROMPT_MODES, normalizePromptMode } from '../c
 import { MAX_TRACKED_SESSIONS, flushHistories, hasExposedToolsChoice, normalizeDeclarationPlacement, readHistories, writeHistories } from '../config/store.js'
 import { CLI_TOOL_NAMES, agentOf, defaultExposedTools, isCollapsedToolset } from '../bridge/tools.js'
 import { CodeBuddyTurn } from './turn.js'
-import { SPENT_TURN } from '../bridge/cards.js'
+import { SPENT_TURN, isDisplayToolName } from '../bridge/cards.js'
 import { continuesSignature, continuesTurn, conversationSignature, latestUserText } from '../conversation/messages.js'
 import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { handoffDigest } from '../conversation/digest.js'
@@ -87,9 +87,10 @@ function accountSeedKey(sessionId, account) {
  * - The CLI runs its **own** tool loop: it calls a tool, receives the result,
  *   and continues, all inside the single process this adapter spawned. Tool
  *   calls are still reported as real `tool-call` blocks so DSH draws its native
- *   cards, but each is paired with a display-only executor registered for that
- *   agent (see {@link installToolCardBridge}) which replays the CLI's recorded
- *   output instead of running the tool a second time.
+ *   cards, but each is paired with a display-only executor registered up front
+ *   and gated to this provider's steps (see `installToolCardBridge`) which
+ *   replays the CLI's recorded output instead of running the tool a second
+ *   time.
  * - That executor does *not* conclude the turn. DSH runs another step after a
  *   message's tool calls, and that step is where the CLI's next assistant
  *   message lands — which is what puts a message's cards before the next
@@ -127,6 +128,9 @@ class CodeBuddyAdapter {
 
   /** The `tools`/`agents` services the bridge executes through. */
   #toolServices
+
+  /** The registered display tools cards are dispatched through. */
+  #cards
 
   /** The Host's attachment service, used to read a user's images as bytes. */
   #attachments
@@ -256,6 +260,19 @@ class CodeBuddyAdapter {
   }
 
   /**
+   * Take the card registry the bridge registered display tools with.
+   *
+   * DSH admits a reported call only when its name was registered before the
+   * step's tool set was frozen, so these definitions cannot come from a
+   * dispatch hook; they are registered up front and this is the handle that
+   * reads them back.
+   * @param cards - the handle from `installToolCardBridge`.
+   */
+  attachToolCards(cards) {
+    this.#cards = cards
+  }
+
+  /**
    * Build the inline MCP config for one CLI process.
    *
    * Empty when no tool is enabled or the bridge has not come up: the CLI then
@@ -300,7 +317,7 @@ class CodeBuddyAdapter {
       ...base,
       sessionId: key,
       available: schemas
-        .filter(schema => schema.name !== 'run_code')
+        .filter(schema => schema.name !== 'run_code' && !isDisplayToolName(schema.name))
         .map(schema => ({
           name: schema.name,
           description: typeof schema.description === 'string' ? schema.description : '',
@@ -745,15 +762,7 @@ class CodeBuddyAdapter {
      */
     const turn = await this.#turnFor(options, prompt, cli)
     try {
-      // A side request never gets dispatchable cards: there is no step loop
-      // behind it to serve the follow-up a tool call would require, so a
-      // reported call left its turn waiting for a next step that never came —
-      // the turn never retired and the session leaked. Tool activity is
-      // reported as reasoning text instead, which is all a session title needs.
-      const cards = typeof options.purpose === 'string' && options.purpose !== ''
-        ? false
-        : !isCollapsedToolset(options.tools)
-      yield* turn.step({ cardsUsable: cards })
+      yield* turn.step(this.#stepOptions(options))
     } catch (error) {
       // Only an account-class rejection before *any* output or tool activity is
       // safe to answer elsewhere. Unknown failures and cancellation never replay
@@ -764,10 +773,38 @@ class CodeBuddyAdapter {
         this.#logger?.info?.(`dsh-connect-codebuddy-cli: account ${turn.accountId} ${outcome}; switching accounts and retrying the turn`)
         this.#dropConversationProcesses(options.sessionId)
         const retry = await this.#turnFor(options, prompt, cli)
-        yield* retry.step({ cardsUsable: typeof options.purpose === 'string' && options.purpose !== '' ? false : !isCollapsedToolset(options.tools) })
+        yield* retry.step(this.#stepOptions(options))
         return
       }
       throw error
+    }
+  }
+
+  /**
+   * The card capabilities of one step.
+   *
+   * A side request never gets dispatchable cards: there is no step loop behind
+   * it to serve the follow-up a tool call would require, so a reported call left
+   * its turn waiting for a next step that never came — the turn never retired
+   * and the session leaked. Tool activity is reported as reasoning text
+   * instead, which is all a session title needs.
+   *
+   * `admitted` is the step's advertised tool list, i.e. the names DSH froze
+   * before the request. A display name missing from it cannot be dispatched by
+   * this step, so the card has to ride the fallback instead. A request that
+   * carried no tool list at all is the collapsed case: nothing would resolve.
+   * @param options - DSH generate options for this step.
+   * @returns the `step()` capabilities shared by a first try and its retry.
+   */
+  #stepOptions(options) {
+    const advertised = Array.isArray(options.tools) ? options.tools : []
+    const cardsUsable = typeof options.purpose === 'string' && options.purpose !== ''
+      ? false
+      : Array.isArray(options.tools) && !isCollapsedToolset(options.tools) && this.#cards?.ready === true
+    return {
+      cardsUsable,
+      cards: cardsUsable ? this.#cards : undefined,
+      admitted: new Set(advertised.map(tool => tool?.name).filter(name => typeof name === 'string' && name !== '')),
     }
   }
 

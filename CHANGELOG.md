@@ -3,11 +3,15 @@
 本文件记录插件的行为变化。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.1.1] - 2026-11-07
 
 ### 新增
 
 - **DSH 工具页的说明提示标**：每个工具勾选项右侧多一个「?」小圆标，鼠标悬浮显示该工具自己的说明文字（来自工具目录的 `description`；宿主未提供说明时给出缺省文案），不用再猜工具是干什么的。
+
+### 修复
+
+- **工具卡不再显示 `Error: unknown tool "Bash"`**：DSH 在每步发模型请求之前就冻结这一步可派发的工具快照，旧实现只在 `tools/execute` 钩子里临时注册卡片工具，名字进不了快照，派发时先抛 `ToolNotFoundError`，卡片就成了 `Error: unknown tool "Bash"`（任何 CLI 工具名都一样）。现在改为插件装配时预先注册兜底展示工具 `codebuddy_cli_call`，每条注册都带 `when`，只对 `codebuddy` 这一路的步准入；第一次见到的 CLI 工具名先走兜底卡（摘要里仍显示「codebuddy_cli_call · Bash」），并补注册同名展示工具，从下一步起卡片显示 CLI 的真实工具名。已被真实工具占用的名字（如 DSH 自带的小写 `read`）不会被注册覆盖，永远走兜底卡。这些展示工具不会出现在「DSH 工具」页的勾选清单与 MCP 桥接列表里——它们只能回放结果，不是可调用的工具。
 
 ### 变更
 

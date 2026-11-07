@@ -19,7 +19,7 @@ dsh-connect-codebuddy-cli/
 │   │   ├── mcp.js        #   loopback MCP 服务（HTTP）
 │   │   ├── shim.mjs      #   stdio MCP 外壳，CLI 作为子进程拉起它
 │   │   ├── tools.js      #   把勾选的 DSH 工具暴露出去，并执行回来
-│   │   ├── cards.js      #   把 CLI 已执行的调用渲染成原生卡片（不重放）
+│   │   ├── cards.js      #   把 CLI 已执行的调用渲染成原生卡片（展示工具预注册、只回放）
 │   │   └── builtin-tools.js # 内置工具名清单，用于标注"非内置"
 │   ├── cli/              # 与本机 CodeBuddy CLI 的进程契约
 │   │   ├── session.js    #   spawn/argv/权限应答/进程回收/转录路径/私有临时文件

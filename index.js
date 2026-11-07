@@ -102,8 +102,10 @@ export function apply(ctx, config) {
   // next model-picker read without reloading the plugin.
   const settings = readSettings()
   const adapter = new CodeBuddyAdapter(resolved, ctx.logger, ctx, settings)
+  // Cards need their display tools registered before the first step's tool set
+  // is frozen: DSH only dispatches names that were admitted up front.
+  adapter.attachToolCards(installToolCardBridge(ctx, PROVIDER_ID))
   ctx.llm.registerAdapter([PROVIDER_ID], adapter)
-  installToolCardBridge(ctx)
   installPluginPage(ctx, adapter, resolved, settings)
   installToolBridge(ctx, adapter, settings)
   installAttachments(ctx, adapter)

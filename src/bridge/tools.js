@@ -6,6 +6,7 @@
  * @module dsh-connect-codebuddy-cli/bridge/tools
  */
 
+import { isDisplayToolName } from './cards.js'
 import { createToolBridge, toMcpInputSchema } from './mcp.js'
 import { hasExposedToolsChoice } from '../config/store.js'
 import { fileURLToPath } from 'node:url'
@@ -20,10 +21,12 @@ const CLI_TOOL_NAMES = new Set([
 /**
  * The tool choice to serve when the user has never made one.
  *
- * Every cataloged tool except `run_code` and the names the CLI already
- * provides itself: the point of the bridge is DSH-only capability, and a
- * bridged duplicate would only shadow the CLI native one. The list is
- * therefore live — it follows whatever the Host currently registers.
+ * Every cataloged tool except `run_code`, the names the CLI already provides
+ * itself, and the display-only card definitions: the point of the bridge is
+ * DSH-only capability, a bridged duplicate would only shadow the CLI native
+ * one, and a card definition would hand the model a tool that can only replay
+ * a recorded result. The list is therefore live — it follows whatever the Host
+ * currently registers.
  * @param schemas - the Host tool schemas (`tools.schemas(agent)`).
  * @returns the default exposed tool names, in catalog order.
  */
@@ -31,7 +34,8 @@ function defaultExposedTools(schemas) {
   if (!Array.isArray(schemas)) return []
   return schemas
     .map(schema => schema?.name)
-    .filter(name => typeof name === 'string' && name !== '' && name !== 'run_code' && !CLI_TOOL_NAMES.has(name))
+    .filter(name => typeof name === 'string' && name !== '' && name !== 'run_code'
+      && !CLI_TOOL_NAMES.has(name) && !isDisplayToolName(name))
 }
 
 /**
@@ -114,7 +118,8 @@ function agentOf(services, sessionId) {
 
 /**
  * The MCP tool list for one session: only what the user enabled, never the ptc
- * transport, and never a tool the model could use to start another model call.
+ * transport, never a display-only card definition, and never a tool the model
+ * could use to start another model call.
  * @param services - the injected services.
  * @param settings - the live settings state.
  * @param sessionId - the DSH session id.
@@ -135,7 +140,7 @@ function listBridgeTools(services, settings, sessionId) {
   const exposed = new Set(chosen)
   if (exposed.size === 0) return []
   return schemas
-    .filter(schema => schema.name !== 'run_code' && exposed.has(schema.name))
+    .filter(schema => schema.name !== 'run_code' && !isDisplayToolName(schema.name) && exposed.has(schema.name))
     .map(schema => ({
       name: schema.name,
       description: typeof schema.description === 'string' && schema.description !== ''
@@ -154,6 +159,7 @@ function listBridgeTools(services, settings, sessionId) {
  */
 async function runBridgeTool(services, settings, request) {
   const name = request.name
+  if (isDisplayToolName(name)) return { ok: false, error: `工具 ${name} 只用于显示卡片，不能桥接` }
   if (!effectiveExposedTools(services, settings, request.sessionId).includes(name)) return { ok: false, error: `工具 ${name} 没有启用` }
   if (name === 'run_code') return { ok: false, error: 'run_code 不能作为桥接工具' }
   const agent = agentOf(services, request.sessionId)

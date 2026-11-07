@@ -8,7 +8,7 @@
 
 import { continuesTurn } from '../conversation/messages.js'
 import { join } from 'node:path'
-import { SPENT_TURN, recordPermissionDenials, recordToolCall, recordToolResults, toolResults } from '../bridge/cards.js'
+import { SPENT_TURN, cardArguments, recordPermissionDenials, recordToolResults, toolResults } from '../bridge/cards.js'
 
 /**
  * One CodeBuddy turn, drained one assistant message at a time.
@@ -123,12 +123,17 @@ class CodeBuddyTurn {
    * @param options - this step's capabilities.
    * @param options.cardsUsable - whether a reported call can be dispatched, so
    *   one CLI message can be its own step.
+   * @param options.cards - the registered display tools, when they are ready.
+   * @param options.admitted - the tool names this step's tool set advertises.
    * @yields DSH stream chunks.
    */
-  async *step({ cardsUsable }) {
+  async *step({ cardsUsable, cards, admitted = new Set() }) {
     if (this.#finished || this.#closed) return
     this.#steps += 1
     const first = this.#steps === 1
+    // A call can only be dispatched when a definition for its wire name was
+    // admitted before this step's tool set was frozen.
+    const dispatchable = cardsUsable === true && cards?.ready === true
 
     /** CLI content-block index → DSH block index, local to this message. */
     const indexMap = new Map()
@@ -188,15 +193,21 @@ class CodeBuddyTurn {
      */
     const flushTool = function* (call) {
       const argsRaw = reorderArguments(call.json)
-      if (!cardsUsable) {
+      if (!dispatchable) {
         sawReasoning = true
         yield { type: 'reasoning-delta', index: call.index, text: `${toolSummary(call.name, call.json)}\n` }
         return
       }
       sawToolCall = true
-      recordToolCall(call.id)
-      yield { type: 'tool-call-delta', index: call.index, id: call.id, name: call.name, argumentsDelta: argsRaw }
-      yield { type: 'block-end', index: call.index, block: { type: 'tool-call', id: call.id, name: call.name, arguments: argsRaw } }
+      // The wire name is decided before the registration below: a name seen for
+      // the first time cannot be admitted by this step, whose tool set was
+      // frozen before the call existed, so it has to ride the fallback card.
+      // Registering it then lets the steps that follow use the real name.
+      const wireName = cards.wireName(call.name, admitted)
+      cards.ensure(call.name)
+      const argumentsJson = cardArguments(call.name, wireName, argsRaw)
+      yield { type: 'tool-call-delta', index: call.index, id: call.id, name: wireName, argumentsDelta: argumentsJson }
+      yield { type: 'block-end', index: call.index, block: { type: 'tool-call', id: call.id, name: wireName, arguments: argumentsJson } }
       awaiting.add(call.id)
     }
 
@@ -310,7 +321,7 @@ class CodeBuddyTurn {
         }
         // Only a step boundary when this step can dispatch: in ptc mode every
         // message is reported as text, so the whole turn stays one row.
-        if (cardsUsable) ended = true
+        if (dispatchable) ended = true
         continue
       }
 

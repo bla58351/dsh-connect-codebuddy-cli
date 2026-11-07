@@ -5,6 +5,7 @@
  * Run: node test/matrix.mjs
  */
 import { apply, PROVIDER_ID, usageOf } from '../index.js'
+import { FALLBACK_TOOL_NAME } from '../src/bridge/cards.js'
 import { contextWindowFor } from '../src/cli/catalog.js'
 import { buildArgs, DEFAULT_MAX_TURNS, readProductModels } from '../src/cli/session.js'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -19,13 +20,38 @@ process.env.DSH_HOME = liveHome
 writeSettings({ hiddenModels: [], keepAliveSeconds: 0 })
 const liveAdapters = new Set()
 
+/**
+ * A stand-in `tools` service, as the Host's registry would supply.
+ *
+ * Cards are dispatched only through definitions registered here, and DSH admits
+ * one only when it existed before the step's tool set was frozen, so the card
+ * tests read this registry rather than a dispatch hook.
+ */
+function fakeTools() {
+  const registry = new Map()
+  const whens = new Map()
+  return {
+    registry,
+    whens,
+    get(name) { return registry.get(name) },
+    register(definition, options) {
+      if (registry.has(definition.name)) throw new Error(`tool "${definition.name}" is already registered`)
+      registry.set(definition.name, definition)
+      whens.set(definition.name, options?.when)
+      return () => { registry.delete(definition.name); whens.delete(definition.name) }
+    },
+  }
+}
+
 /** Build a fresh adapter, capturing what `apply` registers. */
 function makeAdapter(config = { binary: '', models: [], cwd: '' }) {
   let adapter
   const logs = []
   const listeners = {}
+  const tools = fakeTools()
   const agent = { session: { header: { cwd: process.cwd() } } }
   const services = {
+    tools,
     agents: { get: () => agent },
     approval: {
       effectivePolicy: () => 'ask',
@@ -45,7 +71,7 @@ function makeAdapter(config = { binary: '', models: [], cwd: '' }) {
     config,
   )
   liveAdapters.add(adapter)
-  return { adapter, logs, listeners }
+  return { adapter, logs, listeners, tools }
 }
 
 /**
@@ -56,7 +82,7 @@ function makeAdapter(config = { binary: '', models: [], cwd: '' }) {
  * The loop is what makes a tool-using turn work, so a harness that stopped
  * after the first step would only ever see the CLI's first message.
  */
-async function turn(adapter, { model, text, sessionId, signal, effort, tools, listeners, history }) {
+async function turn(adapter, { model, text, sessionId, signal, effort, tools, registered, history }) {
   const human = { id: 'm', role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }
   // DSH projects the whole conversation. Passing that projection between calls
   // is what distinguishes a new turn from a rewind to a different history.
@@ -73,32 +99,16 @@ async function turn(adapter, { model, text, sessionId, signal, effort, tools, li
       steps.push({ chunks, text: chunks.filter(c => c.type === 'text-delta').map(c => c.text).join(''), reasoning: chunks.filter(c => c.type === 'reasoning-delta').map(c => c.text).join('') })
       const cards = chunks.filter(c => c.type === 'block-end' && c.block?.type === 'tool-call').map(c => c.block)
       if (cards.length === 0) break
-      const registry = new Map()
-      const scoped = {
-        registry,
-        registrations: 0,
-        get: name => registry.get(name),
-        register(definition) {
-          this.registrations += 1
-          registry.set(definition.name, definition)
-          return () => registry.delete(definition.name)
-        },
-      }
       messages.push({ id: `a${index}`, role: 'assistant', source: { kind: 'assistant' }, content: cards.map(c => ({ type: 'tool-call', id: c.id, name: c.name, arguments: c.arguments })) })
       for (const card of cards) {
-        const exec = { callId: card.id, name: card.name, arguments: JSON.parse(card.arguments), agent: { ctx: { get: () => scoped } }, concludeTurn() { exec.concluded = true } }
+        const definition = registered?.registry.get(card.name)
+        const definitionFound = definition !== undefined
         let body = ''
-        let definitionFound = false
-        await listeners?.['tools/execute'](exec, async () => {
-          const definition = registry.get(card.name)
-          definitionFound = definition !== undefined
-          if (definitionFound) {
-            const value = await definition.execute(exec.arguments, exec)
-            body = definition.output.render(exec.arguments, value)[0]?.text ?? ''
-          }
-          return {}
-        })
-        dispatched.push({ card, body, definitionFound, registrations: scoped.registrations, registeredAfter: registry.has(card.name), concluded: exec.concluded === true })
+        if (definitionFound) {
+          const value = await definition.execute(JSON.parse(card.arguments), { callId: card.id })
+          body = definition.output.render(JSON.parse(card.arguments), value)[0]?.text ?? ''
+        }
+        dispatched.push({ card, body, definitionFound })
         messages.push({ id: `t${index}`, role: 'tool', source: { kind: 'tool', callId: card.id }, toolCallId: card.id, isError: false, content: [{ type: 'text', text: body }] })
       }
     }
@@ -317,7 +327,7 @@ try {
   // `tool-call` block it is given, so the adapter reports the work as real
   // tool-call blocks paired with a display-only executor registered for that
   // agent — the card renders, and the tool never runs twice.
-  const { adapter, listeners } = makeAdapter()
+  const { adapter, tools } = makeAdapter()
   const probe = `tmp-tool-${unique}.txt`
   const outcome = await turn(adapter, {
     model: 'glm-5.3',
@@ -326,7 +336,7 @@ try {
     // package.json of its own.
     text: `Read the file dsh-connect-codebuddy-cli/package.json and reply with just its "name" value.`,
     sessionId: `x-${unique}`,
-    listeners,
+    registered: tools,
   })
   check('a tool-using turn still answers', outcome.threw === undefined && outcome.text.trim() !== '', JSON.stringify(outcome.text.slice(0, 60)))
   check('the answer reflects real file content', outcome.text.includes('dsh-connect-codebuddy-cli'), JSON.stringify(outcome.text.slice(0, 60)))
@@ -338,7 +348,7 @@ try {
     model: 'glm-5.3',
     text: `Create a file named ${probe} containing exactly TOOLFILE, then reply DONE.`,
     sessionId: `x-${unique}`,
-    listeners,
+    registered: tools,
   })
   const { readFileSync, existsSync, rmSync } = await import('node:fs')
   const created = existsSync(probe) ? readFileSync(probe, 'utf8').trim() : ''
@@ -399,19 +409,22 @@ function distinctIndices(chunks) {
 
 // --- 14. Native tool cards -------------------------------------------------
 {
-  // DSH draws a card only for a `tool-call` block and executes every such
-  // block, so the reported call must come with a display-only executor that
-  // replays the CLI's recorded output. That executor is registered for the
-  // calling agent and retired once the card settles.
-  const { adapter: cardAdapter, listeners } = makeAdapter()
-  check('the plugin installs a tools/execute listener', typeof listeners['tools/execute'] === 'function')
+  // DSH draws a card only for a `tool-call` block and dispatches every such
+  // block, so the reported call must name a display-only definition that was
+  // admitted before that step's tool set was frozen. A definition registered
+  // from inside dispatch arrived too late and made DSH answer
+  // `ToolNotFoundError`; nothing is registered that way any more.
+  const { adapter: cardAdapter, tools } = makeAdapter()
+  check('the fallback card tool is registered before the first turn', tools.registry.has(FALLBACK_TOOL_NAME))
+  const admittedWhen = tools.whens.get(FALLBACK_TOOL_NAME)
+  check('the card tools are admitted only for this provider', admittedWhen?.({ modelSelection: { provider: PROVIDER_ID } }) === true && admittedWhen?.({ modelSelection: { provider: 'deepseek' } }) === false)
 
   const cardFile = `tmp-card-${unique}.txt`
   const carded = await turn(cardAdapter, {
     model: 'glm-5.3',
     text: `Use the Write tool to create ${cardFile} containing exactly CARD-OK, then reply DONE.`,
     sessionId: `c-${unique}`,
-    listeners,
+    registered: tools,
   })
   const { existsSync, rmSync } = await import('node:fs')
   const cardWrote = existsSync(cardFile)
@@ -422,42 +435,25 @@ function distinctIndices(chunks) {
   check('the tool call is reported as a card', blocks.length > 0, `${blocks.length} block(s)`)
   check('every card is introduced by a delta', blocks.every(b => deltas.some(d => d.index === b.index)))
   check('the card carries the CLI call id', blocks.every(b => typeof b.block.id === 'string' && b.block.id !== ''))
-  check('the card carries the CLI tool name', blocks.every(b => typeof b.block.name === 'string' && b.block.name !== ''), blocks.map(b => b.block.name).join(','))
   check('card arguments are valid JSON', blocks.every((b) => { try { JSON.parse(b.block.arguments); return true } catch { return false } }))
-  check('the identifying argument leads the card summary', blocks.every((b) => {
+  check('a name seen for the first time rides the fallback card',
+    blocks.every(b => b.block.name === FALLBACK_TOOL_NAME), blocks.map(b => b.block.name).join(','))
+  check('the fallback card carries the CLI tool name first', blocks.every((b) => {
     const keys = Object.keys(JSON.parse(b.block.arguments))
-    if (keys.includes('file_path')) return keys[0] === 'file_path'
-    if (keys.includes('command')) return keys[0] === 'command'
-    return true
+    return keys[0] === 'tool'
   }), blocks.map(b => Object.keys(JSON.parse(b.block.arguments))[0]).join(','))
+  check('a CLI tool name is registered for the steps that follow', tools.registry.has('Write'), [...tools.registry.keys()].join(','))
 
   const first = blocks[0]
   if (first === undefined) {
     check('a card executor replays the CLI output', false, 'no tool call was produced')
   } else {
     // turn() already dispatched the card once. Inspect that real dispatch; a
-    // second dispatch would consume nothing and is not how DSH uses the bridge.
+    // second dispatch would consume nothing and is not how DSH uses the tool.
     const result = carded.dispatched.find(entry => entry.card.id === first.block.id)
     check('the card gets a resolvable executor', result?.definitionFound === true, first.block.name)
-    check('the executor leaves the turn open for the next step', result?.concluded !== true)
     check('the card body shows the CLI output', result?.body !== '' && result.body.includes(cardFile), JSON.stringify(result?.body?.slice(0, 80)))
-    check('the executor is retired once the card settles', result?.registeredAfter === false)
-    check('one executor per tool name', result?.registrations === 1, String(result?.registrations))
   }
-
-  // A call the CLI never made must reach the real executor untouched.
-  let passedThrough = false
-  await listeners['tools/execute'](
-    { callId: 'no-such-call', name: 'Bash', agent: { ctx: { get: () => ({ get: () => undefined, register: () => {} }) } }, concludeTurn: () => {} },
-    () => { passedThrough = true; return {} },
-  )
-  check('a real call is never shadowed', passedThrough)
-  let runCodePassed = false
-  await listeners['tools/execute'](
-    { callId: 'rc', name: 'run_code', agent: { ctx: { get: () => ({ get: () => undefined, register: () => {} }) } }, concludeTurn: () => {} },
-    () => { runCodePassed = true; return {} },
-  )
-  check('run_code is never shadowed', runCodePassed)
 }
 
 // --- 15. ptc fallback ------------------------------------------------------

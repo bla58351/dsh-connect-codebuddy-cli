@@ -25,6 +25,7 @@ import { toolOrigin } from '../src/bridge/builtin-tools.js'
 import { buildArgs, userFrame, writeSystemPromptFile, codebuddyTranscriptPath, permissionModeFor, safeDenyReason } from '../src/cli/session.js'
 import { approvalSubjectFor } from '../src/adapter/adapter.js'
 import { handoffDigest, handoffMessageText } from '../index.js'
+import { FALLBACK_TOOL_NAME, cardArguments, installToolCardBridge, isDisplayToolName, virtualToolDefinition } from '../src/bridge/cards.js'
 
 const results = []
 function check(label, condition, detail = '') {
@@ -48,27 +49,56 @@ process.env['DSH_HOME'] = testHome
 writeSettings({ hiddenModels: [], keepAliveSeconds: 0 })
 
 /**
- * Build an adapter, capturing the tools/execute waterfall the plugin installs.
+ * A stand-in `tools` service, as the Host's registry would supply.
+ *
+ * Registrations are recorded together with their admission gate, because that
+ * is what decides whether a display tool can ever be dispatched: DSH freezes
+ * the admitted set before the request, so a card tool must exist then and be
+ * gated to this provider's steps.
+ */
+function fakeTools() {
+  const registry = new Map()
+  const whens = new Map()
+  return {
+    registry,
+    whens,
+    get(name) { return registry.get(name) },
+    register(definition, options) {
+      if (registry.has(definition.name)) throw new Error(`tool "${definition.name}" is already registered`)
+      registry.set(definition.name, definition)
+      whens.set(definition.name, options?.when)
+      return () => { registry.delete(definition.name); whens.delete(definition.name) }
+    },
+    schemas() { return [...registry.keys()].map(name => ({ name })) },
+  }
+}
+
+/**
+ * Build an adapter, with the Host services the plugin reads.
  *
  * `services` is the Host's service table, keyed by Cordis service name — the
  * adapter reads `approval`, `sandboxPolicy` and the agent registry through
  * `ctx.get`/`ctx.reflect.get`, and a composition that supplies none of them must
  * still activate (that is the fail-closed path the permission group covers).
+ * A `tools` service is supplied by default: cards cannot be dispatched without
+ * one, and every card assertion here reads its registry.
  * @param binary - the fake CLI entry.
  * @param services - extra Host services; `agents` doubles as the agent registry.
  */
 function makeAdapter(binary, services = {}) {
   const listeners = {}
   let adapter
+  const tools = services.tools ?? fakeTools()
+  const table = { ...services, tools }
   const ctx = {
     llm: { registerAdapter: (_providers, registered) => { adapter = registered } },
     logger: { info: () => {}, warn: () => {} },
     on: (event, listener) => { listeners[event] = listener },
-    get: name => services[name],
-    reflect: { get: name => services[name] },
+    get: name => table[name],
+    reflect: { get: name => table[name] },
   }
   apply(ctx, { binary, models: [], cwd: '' })
-  return { adapter, listeners }
+  return { adapter, listeners, tools }
 }
 
 /**
@@ -119,21 +149,8 @@ async function step(adapter, options) {
   return { chunks, threw, text, cards, finish: chunks.find(c => c.type === 'finish')?.reason }
 }
 
-/** A scoped tool registry, as `exec.agent.ctx.get('tools')` would supply. */
-function scopedTools() {
-  const registry = new Map()
-  return {
-    registry,
-    get(name) { return registry.get(name) },
-    register(definition) {
-      registry.set(definition.name, definition)
-      return () => registry.delete(definition.name)
-    },
-  }
-}
-
 const binary = new URL('./fake-cli.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, '$1')
-const { adapter, listeners } = makeAdapter(binary)
+const { adapter, listeners, tools } = makeAdapter(binary)
 const human = {
   id: 'u1',
   role: 'user',
@@ -162,27 +179,17 @@ check('the first step carries the reasoning of its own message', first.chunks.so
 
 // --- the card's executor replays the result the CLI reported ----------------
 const card = first.cards[0]
+check('the first sight of a CLI tool name rides the fallback card', card?.name === FALLBACK_TOOL_NAME, String(card?.name))
+const args = card === undefined ? {} : JSON.parse(card.arguments)
 let cardText = ''
-let concluded = false
-const tools = scopedTools()
-const exec = {
-  callId: card?.id ?? '',
-  name: card?.name ?? '',
-  arguments: card === undefined ? {} : JSON.parse(card.arguments),
-  agent: { ctx: { get: () => tools } },
-  concludeTurn() { concluded = true },
+const definition = tools.registry.get(card?.name ?? '')
+check('the card gets a resolvable executor', definition !== undefined, String(card?.name))
+if (definition !== undefined) {
+  const value = await definition.execute(args, { callId: card.id })
+  cardText = definition.output.render(args, value)[0]?.text ?? ''
 }
-await listeners['tools/execute'](exec, async () => {
-  const definition = tools.get(exec.name)
-  check('the card gets a resolvable executor', definition !== undefined, exec.name)
-  if (definition === undefined) return {}
-  const value = await definition.execute(exec.arguments, exec)
-  cardText = definition.output.render(exec.arguments, value)[0]?.text ?? ''
-  return {}
-})
 check('the executor replays the CLI\'s own result', cardText === 'Wrote fake-probe.txt', JSON.stringify(cardText))
-check('the identifying argument leads the card summary', Object.keys(exec.arguments)[0] === 'file_path', Object.keys(exec.arguments).join(','))
-check('the executor leaves the turn open for the next step', concluded === false)
+check('the fallback card names the CLI tool first', Object.keys(args)[0] === 'tool' && args.tool === 'Write', Object.keys(args).join(','))
 
 // --- step 2: the continuation DSH asks for after dispatching ----------------
 const second = await step(adapter, {
@@ -243,13 +250,16 @@ const afterNewTurn = readFileSync(counter, 'utf8').split('\n').filter(Boolean)
 check('a new human message starts a new CLI process', afterNewTurn.length === 2, `${afterNewTurn.length} spawn(s)`)
 check('the new turn is served from its first message', third.text.includes('Writing the file now.'), JSON.stringify(third.text.slice(0, 60)))
 check('the new turn reports its own card', third.cards.length === 1)
+// `Write` was registered during the first step, and this step advertises it, so
+// the card can finally carry the CLI's own name instead of the fallback.
+check('a known CLI tool name gets its own card once admitted', third.cards[0]?.name === 'Write', String(third.cards[0]?.name))
 
 // --- two calls in one message ---------------------------------------------
 // The step may only settle once *every* result of that message has arrived, so
 // one missing result cannot leave a card with an empty body.
 {
   process.env['DSH_CODEBUDDY_FAKE_SCENARIO'] = 'two'
-  const { adapter: parallelAdapter, listeners: parallelListeners } = makeAdapter(binary)
+  const { adapter: parallelAdapter, tools: parallelTools } = makeAdapter(binary)
   const parallelHuman = { id: 'u1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Do both things.' }] }
   const parallelSession = 'steps-session-2'
   const first = await step(parallelAdapter, {
@@ -264,15 +274,10 @@ check('the new turn reports its own card', third.cards.length === 1)
 
   const bodies = []
   for (const block of first.cards) {
-    const registry = new Map()
-    const scoped = { get: name => registry.get(name), register: (definition) => { registry.set(definition.name, definition); return () => registry.delete(definition.name) } }
-    const exec = { callId: block.id, name: block.name, arguments: JSON.parse(block.arguments), agent: { ctx: { get: () => scoped } }, concludeTurn() {} }
-    await parallelListeners['tools/execute'](exec, async () => {
-      const definition = registry.get(block.name)
-      const value = await definition.execute(exec.arguments, exec)
-      bodies.push(definition.output.render(exec.arguments, value)[0]?.text ?? '')
-      return {}
-    })
+    const definition = parallelTools.registry.get(block.name)
+    const args = JSON.parse(block.arguments)
+    const value = await definition.execute(args, { callId: block.id })
+    bodies.push(definition.output.render(args, value)[0]?.text ?? '')
   }
   check('every card replays its own result', bodies.includes('Wrote fake-probe.txt') && bodies.includes('Read fake-probe.txt'), JSON.stringify(bodies))
 
@@ -292,56 +297,54 @@ check('the new turn reports its own card', third.cards.length === 1)
   delete process.env['DSH_CODEBUDDY_FAKE_SCENARIO']
 }
 
-// --- card registrations are agent-scoped and dispatch exactly once --------
+// --- a step with no tool list cannot dispatch a reported call ---------------
+// DSH freezes the step's tool set before it builds the request; a request that
+// carried no tool list is the collapsed case, and a card reported there would
+// dispatch into an empty set. The call has to ride the text path instead.
 {
-  const { toolResults } = await import('../src/bridge/cards.js')
-  const execute = listeners['tools/execute']
-  const makeExec = (registry, callId, name = 'ConcurrentTool') => ({
-    callId,
-    name,
-    arguments: {},
-    agent: { ctx: { get: () => registry } },
+  const { adapter: bareAdapter } = makeAdapter(binary)
+  const bare = await step(bareAdapter, {
+    provider: PROVIDER_ID,
+    model: 'glm-5.3',
+    messages: [human],
+    toolHistory: [],
+    sessionId: `steps-bare-${Date.now().toString(36)}`,
   })
-  const firstRegistry = scopedTools()
-  const secondRegistry = scopedTools()
-  toolResults.set('agent-a', 'A')
-  toolResults.set('agent-b', 'B')
-  let finishFirst
-  const firstPending = execute(makeExec(firstRegistry, 'agent-a'), () => new Promise(resolve => { finishFirst = resolve }))
-  await new Promise(resolve => setTimeout(resolve, 0))
-  await execute(makeExec(secondRegistry, 'agent-b'), async () => ({}))
-  finishFirst()
-  await firstPending
-  check('same-name cards in two agents never leak a virtual registration', firstRegistry.get('ConcurrentTool') === undefined && secondRegistry.get('ConcurrentTool') === undefined)
+  check('a step with no tool list reports its call as text', bare.threw === undefined && bare.cards.length === 0, JSON.stringify(bare.cards.map(c => c.name)))
+  check('the text path still names the tool the CLI ran', bare.chunks.some(c => c.type === 'reasoning-delta' && c.text.includes('Running Write')), JSON.stringify(bare.chunks.filter(c => c.type === 'reasoning-delta').map(c => c.text)))
+}
 
-  const shared = scopedTools()
-  toolResults.set('shared-a', 'A')
-  toolResults.set('shared-b', 'B')
-  let finishA
-  let finishB
-  const pendingA = execute(makeExec(shared, 'shared-a'), () => new Promise(resolve => { finishA = resolve }))
-  const pendingB = execute(makeExec(shared, 'shared-b'), () => new Promise(resolve => { finishB = resolve }))
-  await new Promise(resolve => setTimeout(resolve, 0))
-  finishA()
-  await pendingA
-  check('one agent keeps its registration until the last concurrent card settles', shared.get('ConcurrentTool') !== undefined)
-  finishB()
-  await pendingB
-  check('the last concurrent card releases the shared registration', shared.get('ConcurrentTool') === undefined)
-
-  const failing = scopedTools()
-  toolResults.set('throws-once', 'x')
-  let dispatchCalls = 0
-  let caught
-  try {
-    await execute(makeExec(failing, 'throws-once', 'FailingTool'), async () => {
-      dispatchCalls += 1
-      throw new Error('executor failed')
-    })
-  } catch (error) { caught = error }
-  check('an executor error propagates without a second dispatch', caught?.message === 'executor failed' && dispatchCalls === 1, String(dispatchCalls))
-  check('an executor error still releases its virtual registration', failing.get('FailingTool') === undefined)
-  for (const id of ['agent-a', 'agent-b', 'shared-a', 'shared-b', 'throws-once']) toolResults.delete(id)
+// --- card tools are registered up front, gated to this provider ------------
+// DSH admits a call only when its name was registered before the step's tool
+// set was frozen, so the definitions cannot come from a dispatch hook. Every
+// registration is also gated by `when`, which is what keeps a CLI tool name out
+// of another model's tool list.
+{
+  const service = fakeTools()
+  const handle = installToolCardBridge({ get: name => (name === 'tools' ? service : undefined) }, PROVIDER_ID)
+  check('the fallback card tool is registered when the tools service exists', handle.ready === true && service.registry.has(FALLBACK_TOOL_NAME))
+  const fallbackWhen = service.whens.get(FALLBACK_TOOL_NAME)
+  check('a card tool admits only this provider\'s steps', fallbackWhen?.({ modelSelection: { provider: PROVIDER_ID } }) === true && fallbackWhen?.({ modelSelection: { provider: 'openai' } }) === false)
+  check('a CLI tool name is registered on first sight', handle.ensure('Write') === true && service.registry.has('Write'))
+  check('only a registered and admitted name rides its own card', handle.wireName('Write', new Set(['Write'])) === 'Write' && handle.wireName('Write', new Set()) === FALLBACK_TOOL_NAME)
+  check('an unregistered name falls back', handle.wireName('Bash', new Set(['Bash'])) === FALLBACK_TOOL_NAME)
+  const wrapped = JSON.parse(cardArguments('Bash', FALLBACK_TOOL_NAME, '{"command":"ls"}'))
+  check('a fallback card carries the CLI tool name first', wrapped.tool === 'Bash' && Object.keys(wrapped)[0] === 'tool')
+  // A name DSH already owns is never shadowed: registration fails and the card
+  // stays on the fallback instead of running the real tool with CLI arguments.
+  const occupied = fakeTools()
+  occupied.register({ name: 'Write' }, { when: () => true })
+  const shadowed = installToolCardBridge({ get: name => (name === 'tools' ? occupied : undefined) }, PROVIDER_ID)
+  check('a name owned by a real tool is not registered again', shadowed.ensure('Write') === false && shadowed.wireName('Write', new Set(['Write'])) === FALLBACK_TOOL_NAME)
+  check('a collision does not disable the fallback cards', shadowed.ready === true)
+  check('no dispatch hook is installed', listeners['tools/execute'] === undefined)
+  // A card definition is display only: the settings page and the MCP bridge
+  // must never offer it as something the model can call.
+  check('a card tool is flagged as display only',
+    isDisplayToolName(FALLBACK_TOOL_NAME) === true && isDisplayToolName('Write') === true && isDisplayToolName('ask_user') === false,
+    JSON.stringify([isDisplayToolName(FALLBACK_TOOL_NAME), isDisplayToolName('Write'), isDisplayToolName('ask_user')]))
+  const bridged = defaultExposedTools([{ name: 'ask_user' }, { name: 'Write' }, { name: FALLBACK_TOOL_NAME }])
+  check('a card definition never reaches a tool list', JSON.stringify(bridged) === JSON.stringify(['ask_user']), JSON.stringify(bridged))
 }
 
 // --- turn budget reaches the CLI ------------------------------------------
@@ -488,43 +491,28 @@ check('the new turn reports its own card', third.cards.length === 1)
   // denial instead of falling through to the real executor.
   {
     process.env['DSH_CODEBUDDY_FAKE_PERMISSION_NO_USER_RESULT'] = '1'
-    const { adapter: denialAdapter, listeners: denialListeners } = makeAdapter(binary)
+    const { adapter: denialAdapter, tools: denialTools } = makeAdapter(binary)
     const deniedStep = await step(denialAdapter, { provider: PROVIDER_ID, model: 'glm-5.3', messages: [{ id: 'deny-only', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Write' }] }], toolHistory: [], sessionId: `deny-only-${Date.now().toString(36)}`, tools: [{ name: 'Write' }] })
     const deniedCard = deniedStep.cards[0]
-    const registry = scopedTools()
+    const definition = denialTools.registry.get(deniedCard?.name ?? '')
     let body = ''
-    let realCalls = 0
-    let definition
-    await denialListeners['tools/execute']({ callId: deniedCard.id, name: deniedCard.name, arguments: {}, agent: { ctx: { get: () => registry } } }, async () => {
-      definition = registry.get(deniedCard.name)
-      if (definition === undefined) {
-        realCalls += 1
-        return {}
-      }
+    if (definition !== undefined) {
       const value = await definition.execute({}, { callId: deniedCard.id })
       body = definition.output.render({}, value)[0]?.text ?? ''
-      return {}
-    })
-    check('a terminal-only denial still gets a replay executor', definition !== undefined, deniedCard.name)
+    }
+    check('a terminal-only denial still gets a replay executor', definition !== undefined, String(deniedCard?.name))
     check('the terminal-only denial body reaches the card', body.includes('无法审批') && body.includes('Write'), body)
-    check('a denied call never falls through to the real executor', realCalls === 0 && registry.get(deniedCard.name) === undefined, String(realCalls))
+    check('the denial is replayed, never executed again', definition?.name === deniedCard?.name, String(definition?.name))
     await denialAdapter.dispose()
     delete process.env['DSH_CODEBUDDY_FAKE_PERMISSION_NO_USER_RESULT']
   }
 
-  // A known CLI call with no result at all is still display-only.
+  // A CLI call with no result at all is still display-only.
   {
-    const { recordToolCall } = await import('../src/bridge/cards.js')
-    recordToolCall('missing-result-call')
-    const registry = scopedTools()
-    let body = ''
-    await listeners['tools/execute']({ callId: 'missing-result-call', name: 'Write', arguments: {}, agent: { ctx: { get: () => registry } } }, async () => {
-      const definition = registry.get('Write')
-      const value = await definition.execute({}, { callId: 'missing-result-call' })
-      body = definition.output.render({}, value)[0]?.text ?? ''
-      return {}
-    })
-    check('a missing result returns a safe error instead of executing again', body.includes('没有返回该调用的结果') && registry.get('Write') === undefined, body)
+    const definition = virtualToolDefinition('Write')
+    const value = await definition.execute({}, { callId: 'missing-result-call' })
+    const body = definition.output.render({}, value)[0]?.text ?? ''
+    check('a missing result returns a safe error instead of executing again', body.includes('没有返回该调用的结果'), body)
   }
 
   // A human said no: the deny carries their decision through, and the CLI

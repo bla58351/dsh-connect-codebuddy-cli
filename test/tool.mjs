@@ -1,7 +1,8 @@
 /**
  * One real tool-using turn through the adapter, driven the way DSH drives it:
  * a step per assistant message, each step's tool calls dispatched through the
- * plugin's own `tools/execute` waterfall before the next step is asked for.
+ * display tools the plugin registered before the turn, before the next step is
+ * asked for.
  *
  * It prints one line per step so the shape is visible — a message's cards must
  * belong to that step, and the last step must carry no call at all, because
@@ -20,10 +21,20 @@ const liveHome = mkdtempSync(join(tmpdir(), 'dsh-tool-'))
 process.env.DSH_HOME = liveHome
 writeSettings({ hiddenModels: [], keepAliveSeconds: 0 })
 
-const listeners = {}
 let adapter
 const agent = { session: { header: { cwd: process.cwd() } } }
+// The Host's tool registry: the plugin registers its display tools here before
+// the first step, which is the only way DSH can dispatch a reported call.
+const registry = new Map()
+const tools = {
+  get: name => registry.get(name),
+  register(definition) {
+    registry.set(definition.name, definition)
+    return () => registry.delete(definition.name)
+  },
+}
 const services = {
+  tools,
   agents: { get: () => agent },
   approval: { effectivePolicy: () => 'ask', request: async () => 'allowed-once' },
 }
@@ -31,7 +42,7 @@ apply(
   {
     llm: { registerAdapter: (_p, a) => { adapter = a } },
     logger: { info() {}, warn: m => console.log('[warn]', m) },
-    on: (e, l) => { listeners[e] = l },
+    on: () => {},
     get: name => services[name],
     reflect: { get: name => services[name] },
   },
@@ -58,21 +69,16 @@ for (let index = 0; index < 12; index += 1) {
   steps.push({ text, reasoning, cards })
   if (cards.length === 0) break
 
-  const registry = new Map()
-  const scoped = { get: name => registry.get(name), register: (definition) => { registry.set(definition.name, definition); return () => registry.delete(definition.name) } }
   messages.push({ id: `a${index}`, role: 'assistant', source: { kind: 'assistant' }, content: cards.map(c => ({ type: 'tool-call', id: c.id, name: c.name, arguments: c.arguments })) })
   for (const card of cards) {
-    const exec = { callId: card.id, name: card.name, arguments: JSON.parse(card.arguments), agent: { ctx: { get: () => scoped } }, concludeTurn() { exec.concluded = true } }
+    const definition = registry.get(card.name)
     let body = ''
-    await listeners['tools/execute'](exec, async () => {
-      const definition = registry.get(card.name)
-      if (definition !== undefined) {
-        const value = await definition.execute(exec.arguments, exec)
-        body = definition.output.render(exec.arguments, value)[0]?.text ?? ''
-      }
-      return {}
-    })
-    if (exec.concluded === true) console.log('FAIL  the card ended the turn; the next message can never be reached')
+    if (definition === undefined) {
+      console.log(`FAIL  no display tool is registered for ${card.name}`)
+    } else {
+      const value = await definition.execute(JSON.parse(card.arguments), { callId: card.id })
+      body = definition.output.render(JSON.parse(card.arguments), value)[0]?.text ?? ''
+    }
     messages.push({ id: `t${index}`, role: 'tool', source: { kind: 'tool', callId: card.id }, toolCallId: card.id, isError: false, content: [{ type: 'text', text: body }] })
     console.log(`  card ${card.name} ${card.arguments.slice(0, 60)} -> ${JSON.stringify(body.slice(0, 60))}`)
   }
