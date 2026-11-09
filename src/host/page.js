@@ -10,7 +10,7 @@ import { accountsPath, prepareAccount, readAccounts, writeAccounts } from '../ac
 import { cliStatus, readAccount, readCredits } from '../account/session.js'
 import { DEFAULT_MAX_TURNS, readAdvertisedModelIds, readProductModels } from '../cli/session.js'
 import { MAX_CUSTOM_PROMPT_CHARS, normalizePromptMode } from '../config/prompt.js'
-import { hasExposedToolsChoice, normalizeDeclarationPlacement, normalizeKeepAlive, settingsPath, writeSettings } from '../config/store.js'
+import { clearExposedToolsChoice, hasExposedToolsChoice, normalizeDeclarationPlacement, normalizeKeepAlive, settingsPath, writeSettings } from '../config/store.js'
 import { describeReadiness } from './readiness.js'
 
 /**
@@ -86,6 +86,8 @@ async function dispatchPageRequest(endpoint, payload, signal, state) {
         return { ok: true, value: savePrompt(state, payload) }
       case 'save-tools':
         return { ok: true, value: saveExposedTools(state, payload) }
+      case 'reset-tools':
+        return { ok: true, value: resetExposedTools(state) }
       case 'accounts':
         return { ok: true, value: await saveAccounts(state, payload) }
       case 'prepare-account':
@@ -300,6 +302,27 @@ function saveExposedTools(state, payload) {
 }
 
 /**
+ * Restore the recorded default tool choice and persist it.
+ *
+ * "Default" is the state before any save: no `exposedTools` key, so the
+ * effective list keeps following the Host catalog (everything except CLI
+ * overlaps and `run_code`) instead of a snapshot taken today. Clearing the key
+ * — not writing `[]` — is what does that, and the live settings copy drops the
+ * list too so the running adapter answers from the same rule.
+ * @param state - the adapter, configuration, and live settings.
+ * @returns the refreshed tool catalog.
+ */
+function resetExposedTools(state) {
+  const { adapter, settings } = state
+  if (!clearExposedToolsChoice()) throw new Error(`无法写入设置文件：${settingsPath()}`)
+  settings.exposedTools = []
+  // The stored list no longer exists; the catalog resolves its default through
+  // the same probe the bridge uses, so the page immediately shows it.
+  adapter.discardParkedForPromptChange()
+  return adapter.toolCatalog()
+}
+
+/**
  * Build the whole settings document for a write.
  *
  * Every save has to carry every field: the store replaces the file, so a save
@@ -444,6 +467,7 @@ export {
   installPluginPage,
   modelChoices,
   prepareAccountRow,
+  resetExposedTools,
   saveAccounts,
   saveExposedTools,
   saveModels,

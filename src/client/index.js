@@ -540,7 +540,7 @@ window.__ModuleLoader__.load({
 		* @param props - settings state, the tool draft, and the handlers.
 		* @returns the rendered panel.
 		*/
-		function SettingsPanel({ data, busy, onKeepAlive, subTab, onSubTab, toolDraft, onToggleTool, onSaveTools, savingTools, toolsDirty, toolsSaved, toolError, prompt, promptDraft, onMode, onText, onSavePrompt, savingPrompt, promptDirty, promptSaved, promptError, onDeclareTools, onDeclarationPlacement }) {
+		function SettingsPanel({ data, busy, onKeepAlive, subTab, onSubTab, toolDraft, onToggleTool, onSaveTools, onResetTools, savingTools, toolsDirty, toolsSaved, toolError, prompt, promptDraft, onMode, onText, onSavePrompt, savingPrompt, promptDirty, promptSaved, promptError, onDeclareTools, onDeclarationPlacement }) {
 			const keepAlive = data?.backend?.keepAliveSeconds ?? 0
 			const presets = [0, 60, 300, 900, 1800]
 			const tools = data?.tools
@@ -608,7 +608,15 @@ window.__ModuleLoader__.load({
 									size: "sm",
 									disabled: !toolsDirty || savingTools === true,
 									onClick: onSaveTools
-								}, savingTools === true ? pick("正在保存…", "Saving…") : toolsSaved && !toolsDirty ? pick("已保存", "Saved") : pick("保存", "Save"))
+								}, savingTools === true ? pick("正在保存…", "Saving…") : toolsSaved && !toolsDirty ? pick("已保存", "Saved") : pick("保存", "Save")),
+								// The reset only means something when a stored choice exists to
+								// undo: without one the page is already showing the default.
+								h(primitives.Button, {
+									variant: "outline",
+									size: "sm",
+									disabled: savingTools === true || data?.tools?.stored !== true,
+									onClick: onResetTools
+								}, pick("恢复默认", "Reset to default"))
 							),
 							toolError === "" ? null : h("p", { className: "cbc_error" }, toolError)
 						)
@@ -929,6 +937,34 @@ window.__ModuleLoader__.load({
 					setSavingTools(false)
 				}
 			}, [toolDraft])
+			/**
+			* Undo the stored tool choice and return to the recorded default.
+			*
+			* The reset drops the `exposedTools` key rather than writing a snapshot, so
+			* the effective list goes back to following the Host catalog; the refreshed
+			* catalog (which now reports `stored: false`) becomes the new baseline for
+			* the draft and the dirty check.
+			*/
+			const resetTools = react.useCallback(async () => {
+				const rpc = transport
+				if (rpc === undefined) return
+				setSavingTools(true)
+				setToolError("")
+				try {
+					const result = await rpc.call(CHANNEL, "reset-tools", {})
+					if (result?.ok !== true) throw new Error(result?.error?.message ?? pick("重置失败", "Reset failed"))
+					const catalog = result.value
+					setData(previous => previous === undefined ? previous : { ...previous, tools: catalog })
+					const exposed = Array.isArray(catalog?.exposed) ? catalog.exposed : []
+					setToolDraft(exposed)
+					setToolSaved(exposed)
+					setToolsSavedFlag(false)
+				} catch (cause) {
+					setToolError(cause instanceof Error ? cause.message : String(cause))
+				} finally {
+					setSavingTools(false)
+				}
+			}, [])
 /** Save one prompt choice; the text and the declaration switch ride along. */
 			const savePrompt = react.useCallback(async (mode, text, declareTools, declarationPlacement) => {
 				const rpc = transport
@@ -1087,6 +1123,7 @@ window.__ModuleLoader__.load({
 									toolDraft: currentToolDraft,
 									onToggleTool: toggleTool,
 									onSaveTools: saveTools,
+									onResetTools: resetTools,
 									savingTools,
 									toolsDirty,
 									toolsSaved: toolsSavedFlag,

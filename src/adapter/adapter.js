@@ -296,11 +296,15 @@ class CodeBuddyAdapter {
 
   /**
    * Describe the tools that can be bridged, for the settings page.
-   * @returns `{ available, exposed, sessionId, bridge }`.
+   * @returns `{ available, exposed, stored, sessionId, bridge }`.
    */
   toolCatalog() {
     const exposed = this.#effectiveExposedTools()
-    const base = { exposed, available: [], sessionId: '', bridge: this.#bridge?.ready === true }
+    // Whether the settings file carries an explicit choice, as opposed to the
+    // live default: the page's reset button only means something when a choice
+    // exists to undo.
+    const stored = hasExposedToolsChoice()
+    const base = { exposed, stored, available: [], sessionId: '', bridge: this.#bridge?.ready === true }
     const services = this.#toolServices
     if (services === undefined || services.tools === undefined) return base
     const key = this.#lastKey !== '' ? this.#lastKey : latestSessionId()

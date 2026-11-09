@@ -556,6 +556,10 @@ check('the tools page shows the live default choice',
   && defaultEnabled.every(([name, on]) => name === 'write' ? on === false : on === true),
   JSON.stringify(defaultEnabled))
 check('the tools page starts without a save', !rpcCalls.includes('/codebuddy:save-tools'))
+// While the settings file carries no explicit choice the page already shows the
+// default, so the reset has nothing to undo and must be idle.
+check('the reset is idle while the choice is still the default',
+  findVisible(toolsTree, node => node?.type === 'button' && text(node) === '恢复默认')?.props?.disabled === true)
 
 const toolBox = findVisible(toolsTree, node => node?.type === 'input' && node?.props?.type === 'checkbox' && node.props.checked === false)
 check('the tools page renders checkboxes', toolBox !== undefined)
@@ -572,6 +576,47 @@ check('the tool choice reaches the host', rpcCalls.includes('/codebuddy:save-too
 const storedTools = JSON.parse(readFileSync(settingsPath(), 'utf8'))
 check('the tool choice is persisted', Array.isArray(storedTools.exposedTools) && storedTools.exposedTools.includes('example_tool') && storedTools.exposedTools.includes('write'), JSON.stringify(storedTools.exposedTools))
 check('the tools page reports the save', text(toolsSavedTree).includes('已保存'))
+
+// --- the tools reset restores the recorded default --------------------------
+// "Default" is the state before any save: the settings file carries no
+// `exposedTools` key at all, so the effective list keeps following the Host
+// catalog. Writing `[]` would freeze an empty list; only dropping the key
+// undoes the choice, which is what the reset endpoint is for.
+{
+  const storedBefore = JSON.parse(readFileSync(settingsPath(), 'utf8'))
+  check('a stored choice exists before the reset', Array.isArray(storedBefore.exposedTools) && storedBefore.exposedTools.length > 0, JSON.stringify(storedBefore.exposedTools))
+  check('the stored choice flips the catalog flag', lastOverview?.tools?.stored === true || hostAdapter.toolCatalog().stored === true)
+  const resetButton = findVisible(toolsSavedTree, node => node?.type === 'button' && text(node) === '恢复默认')
+  check('the tools page offers a reset once a choice is stored', resetButton?.props?.disabled === false)
+  resetButton?.props?.onClick()
+  const resetTree = await settle(registration.component)
+  check('the reset reaches the host', rpcCalls.includes('/codebuddy:reset-tools'))
+  const afterReset = JSON.parse(readFileSync(settingsPath(), 'utf8'))
+  check('the reset drops the stored key, not an empty list', afterReset.exposedTools === undefined, JSON.stringify(afterReset.exposedTools))
+  check('the reset keeps the other settings', afterReset.keepAliveSeconds === storedBefore.keepAliveSeconds && afterReset.hiddenModels.length === storedBefore.hiddenModels.length, JSON.stringify({ keepAliveSeconds: afterReset.keepAliveSeconds, hiddenModels: afterReset.hiddenModels }))
+  const catalog = hostAdapter.toolCatalog()
+  check('the catalog no longer reports a stored choice', catalog.stored === false, JSON.stringify(catalog.stored))
+  // Back on the live default: everything checked except the CLI overlap, the
+  // same assertion the pre-save page made through the overview RPC.
+  const defaultAgain = catalog.available.map(row => [row.name, row.enabled === true])
+  check('the reset restores the live default choice',
+    defaultAgain.length === 3
+    && defaultAgain.every(([name, on]) => name === 'write' ? on === false : on === true),
+    JSON.stringify(defaultAgain))
+  check('the page shows the reset draft as clean', findVisible(resetTree, node => node?.type === 'button' && node.props['data-variant'] === 'primary' && text(node) === '保存')?.props?.disabled === true)
+  check('the reset is idle again', findVisible(resetTree, node => node?.type === 'button' && text(node) === '恢复默认')?.props?.disabled === true)
+  // The draft must follow the restored default, or the next save would write
+  // the old choice straight back. The visible panel's checkboxes are the draft.
+  const resetPanel = findVisible(resetTree, node => node?.props?.id === 'cbc-panel-settings')
+  const draftState = collect(resetPanel, node => node?.type === 'label' && node.props['data-class'] === 'cbc_check').map(node => {
+    const input = (node.children ?? []).find(child => child?.type === 'input')
+    return [text(node), input?.props?.checked === true]
+  })
+  check('the draft follows the restored default',
+    draftState.length === 3
+    && draftState.every(([name, on]) => name === 'write' ? on === false : on === true),
+    JSON.stringify(draftState))
+}
 
 // --- the accounts page ------------------------------------------------------
 const accountsFileBefore = existsSync(accountsPath()) ? readFileSync(accountsPath(), 'utf8') : ''

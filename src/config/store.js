@@ -290,7 +290,6 @@ export function readSettings() {
  * @returns whether the write succeeded.
  */
 export function writeSettings(settings) {
-  const path = settingsPath()
   const value = {
     hiddenModels: Array.isArray(settings?.hiddenModels)
       ? settings.hiddenModels.filter(id => typeof id === 'string' && id !== '')
@@ -310,7 +309,46 @@ export function writeSettings(settings) {
     declareTools: settings?.declareTools === false ? false : true,
     declarationPlacement: normalizeDeclarationPlacement(settings?.declarationPlacement),
   }
+  const path = settingsPath()
   const text = `${JSON.stringify(value, null, 2)}\n`
+  return writeAtomically(path, text)
+}
+
+/**
+ * Remove the stored tool choice.
+ *
+ * The tools page's reset has to restore the *recorded* default, which is not a
+ * frozen list but "follow the Host catalog": `readSettings` cannot tell a
+ * missing key from an explicit choice, and neither can a written `[]` — that is
+ * a deliberate empty list. So the reset rewrites the document without the
+ * `exposedTools` key at all, exactly the shape a never-saved settings file has.
+ * @returns whether the write succeeded.
+ */
+export function clearExposedToolsChoice() {
+  const stored = readSettings()
+  const path = settingsPath()
+  const value = {
+    hiddenModels: stored.hiddenModels,
+    keepAliveSeconds: stored.keepAliveSeconds,
+    promptMode: stored.promptMode,
+    customPrompt: stored.customPrompt,
+    declareTools: stored.declareTools !== false,
+    declarationPlacement: stored.declarationPlacement,
+  }
+  const text = `${JSON.stringify(value, null, 2)}\n`
+  return writeAtomically(path, text)
+}
+
+/**
+ * Write text to a file through a temporary sibling and a rename.
+ *
+ * Shared by every settings write so a reader never observes a half-written
+ * document, and so a failed write leaves the previous values intact.
+ * @param path - the destination file.
+ * @param text - the full document text.
+ * @returns whether the write succeeded.
+ */
+function writeAtomically(path, text) {
   const temporary = `${path}.${process.pid}.tmp`
   try {
     mkdirSync(dirname(path), { recursive: true })
