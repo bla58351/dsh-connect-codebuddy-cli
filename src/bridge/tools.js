@@ -167,22 +167,33 @@ async function runBridgeTool(services, settings, request) {
   if (services.tools === undefined || typeof services.tools.execute !== 'function') {
     return { ok: false, error: '宿主没有提供工具执行接口' }
   }
-  const result = await services.tools.execute({
-    callId: `mcp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    rootCallId: undefined,
-    name,
-    arguments: request.arguments ?? {},
+  // DSH takes a complete raw *batch*, even for one call: the executor rebuilds
+  // each call from `{ id, name, arguments }` (arguments is the raw JSON text)
+  // and settles them together. A single-call object is not a valid input — the
+  // batch destructures `calls` and every bridged call fails before dispatch.
+  const callId = `mcp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const settled = await services.tools.execute({
+    calls: [{
+      id: callId,
+      name,
+      arguments: JSON.stringify(request.arguments ?? {}),
+    }],
     agent,
     // The Host's dispatch reads this signal, so omitting it fails inside the
     // pipeline rather than at the boundary.
     signal: request.signal ?? new AbortController().signal,
   })
+  const entry = Array.isArray(settled?.results)
+    ? settled.results.find(candidate => candidate?.callId === callId) ?? settled.results[0]
+    : undefined
+  const result = entry?.result
   const blocks = Array.isArray(result?.content) ? result.content : []
   const text = blocks
     .filter(block => block?.type === 'text' && typeof block.text === 'string')
     .map(block => block.text)
     .join('\n')
-  return { ok: true, text, ...(result?.isError === true ? { isError: true } : {}) }
+  if (result === undefined) return { ok: false, error: '宿主没有返回该调用的结果' }
+  return { ok: true, text, ...(result.isError === true ? { isError: true } : {}) }
 }
 
 /**

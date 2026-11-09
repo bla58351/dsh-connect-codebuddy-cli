@@ -1,6 +1,6 @@
 {
   "name": "dsh-connect-codebuddy-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "把 CodeBuddy 的模型接进 DSH 的模型选择器：选中 CodeBuddy 模型后，这一轮推理由本机已登录的 CodeBuddy CLI 执行，DSH 只负责显示与传输。",

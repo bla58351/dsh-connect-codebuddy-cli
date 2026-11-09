@@ -58,7 +58,7 @@ function prosePattern(suite) {
 // a static count of `check('` can differ by the odd conditional branch. matrix
 // is a live suite whose outcome depends on the account and network, so its
 // prose only needs to mention the suite, not pin a number.
-const RUNTIME_COUNTS = { 'steps.mjs': 282, 'page.mjs': 112 }
+const RUNTIME_COUNTS = { 'steps.mjs': 289, 'page.mjs': 124 }
 const DETAILS = readFileSync(join(ROOT, 'docs', 'DETAILS.md'), 'utf8')
 
 for (const [suite, actual] of Object.entries(RUNTIME_COUNTS)) {

@@ -1028,6 +1028,56 @@ check('a known CLI tool name gets its own card once admitted', third.cards[0]?.n
   check('the bridge closes', bridge.ready === false)
 }
 
+// --- a bridged call is a DSH batch, not a single call -----------------------
+{
+  // `tools.execute` takes a complete raw batch: the executor destructures
+  // `calls` and rebuilds every call from `{ id, name, arguments }`. Passing a
+  // single-call object fails before dispatch, so every CLI-side MCP call dies
+  // with a TypeError instead of running the tool.
+  const { runBridgeTool } = await import('../src/bridge/tools.js')
+  writeSettings({ hiddenModels: [], keepAliveSeconds: 0, exposedTools: ['example_tool'] })
+  const settings = { exposedTools: ['example_tool'] }
+  const batched = []
+  const services = {
+    tools: {
+      schemas: () => [{ name: 'example_tool', parameters: { type: 'object', properties: {} } }],
+      execute: async (input) => {
+        batched.push(input)
+        return { results: [{ callId: input.calls?.[0]?.id, result: { content: [{ type: 'text', text: 'ran example_tool' }] } }] }
+      },
+    },
+    agents: { get: () => ({ session: { header: { cwd: process.cwd() } } }) },
+  }
+  const outcome = await runBridgeTool(services, settings, { sessionId: 'session-a', name: 'example_tool', arguments: { text: 'hi' } })
+  const batch = batched[0]
+  check('the bridged call is one batch of one call', Array.isArray(batch?.calls) && batch.calls.length === 1, JSON.stringify(batch))
+  check('the batch names the call', typeof batch?.calls?.[0]?.id === 'string' && batch.calls[0].name === 'example_tool', JSON.stringify(batch?.calls?.[0]))
+  check('the batch carries the arguments as raw JSON text', batch?.calls?.[0]?.arguments === '{"text":"hi"}', String(batch?.calls?.[0]?.arguments))
+  check('the settled result text is returned', outcome.ok === true && outcome.text === 'ran example_tool', JSON.stringify(outcome))
+
+  // isError must survive the round trip; otherwise the CLI treats a failure as
+  // a successful result.
+  services.tools.execute = async (input) => ({
+    results: [{ callId: input.calls[0].id, result: { content: [{ type: 'text', text: 'boom' }], isError: true } }],
+  })
+  const failedOutcome = await runBridgeTool(services, settings, { sessionId: 'session-a', name: 'example_tool', arguments: {} })
+  check('a failed tool result keeps isError', failedOutcome.ok === true && failedOutcome.isError === true && failedOutcome.text === 'boom', JSON.stringify(failedOutcome))
+
+  // A batch that settles nothing is an error, not a blank success.
+  services.tools.execute = async () => ({ results: [] })
+  const emptyOutcome = await runBridgeTool(services, settings, { sessionId: 'session-a', name: 'example_tool', arguments: {} })
+  check('a batch without a result is reported as an error', emptyOutcome.ok === false && typeof emptyOutcome.error === 'string', JSON.stringify(emptyOutcome))
+
+  // A card definition is display only: it must never be executed through the
+  // bridge, even when an old settings document still names it.
+  writeSettings({ hiddenModels: [], keepAliveSeconds: 0, exposedTools: [FALLBACK_TOOL_NAME] })
+  const displayServices = { tools: services.tools, agents: services.agents }
+  const displayOutcome = await runBridgeTool(displayServices, { exposedTools: [FALLBACK_TOOL_NAME] }, { sessionId: 'session-a', name: FALLBACK_TOOL_NAME, arguments: {} })
+  check('a display tool is refused by the bridge', displayOutcome.ok === false, JSON.stringify(displayOutcome))
+
+  writeSettings({ hiddenModels: [], keepAliveSeconds: 0 })
+}
+
 // --- the MCP config reaches the CLI argv ------------------------------------
 {
   // The shim path the bridge advertises must point at a file that actually
